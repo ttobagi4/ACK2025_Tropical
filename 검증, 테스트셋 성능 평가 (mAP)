@@ -1,0 +1,71 @@
+# (6) mAP 평가 (검증셋)
+# 모델 생성 함수 (클래스 수 맞춰서)
+def get_model_instance(num_classes) :
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
+# device 설정
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+# 체크포인트 경로
+checkpoint_dir = "/content/drive/MyDrive/Colab/ACK2025/olive/model"
+checkpoint_files = sorted(glob.glob(f"{checkpoint_dir}/*.pth"))
+
+# 클래스 수
+num_classes = 3
+
+# mAP 평가
+for checkpoint_path in checkpoint_files :
+    # 모델 불러오기
+    model = get_model_instance(num_classes).to(device)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+
+    # mAP 측정기 초기화
+    metric = MeanAveragePrecision()
+    with torch.no_grad() :
+        for images, targets in val_loader :
+            images = [img.to(device) for img in images]
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+            outputs = model(images)
+            metric.update(outputs, targets)
+
+    # 결과 출력
+    result = metric.compute()
+    epoch_num = checkpoint['epoch']
+    print(f"[Epoch {epoch_num:02d}] mAP : {result['map']:.4f}, mAP@50 : {result['map_50']:.4f}")
+
+# (7) mAP 평가 (테스트셋)
+# 모델 생성
+def get_model_instance(num_classes) :
+    model = fasterrcnn_resnet50_fpn(pretrained=False)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
+device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+checkpoint_path = "/content/drive/MyDrive/Colab/ACK2025/olive/model/250703_epoch_7.pth"
+num_classes = 3
+
+# 모델 불러오기
+model = get_model_instance(num_classes).to(device)
+checkpoint = torch.load(checkpoint_path, map_location=device)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()
+
+# mAP 평가
+metric = MeanAveragePrecision()
+with torch.no_grad() :
+    for images, targets in test_loader :
+        images = [img.to(device) for img in images]
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        outputs = model(images)
+        metric.update(outputs, targets)
+
+result = metric.compute()
+epoch_num = checkpoint['epoch']
+print(f"[Epoch {epoch_num:02d}] mAP : {result['map']:.4f}, mAP@50 : {result['map_50']:.4f}")
