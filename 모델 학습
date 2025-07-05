@@ -18,7 +18,11 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torchvision.ops import box_iou
+from sklearn.metrics import precision_recall_curve, average_precision_score
+from tqdm import tqdm
 %matplotlib inline
 
 # (3) 사용자 정의 Dataset 클래스 구현
