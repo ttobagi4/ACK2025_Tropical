@@ -1,45 +1,49 @@
-# (6) mAP 평가 (검증셋)
-# 모델 생성 함수 (클래스 수 맞춰서)
+# mAP 평가 (검증셋)
+# 모델 생성 (사전학습 X, 출력 클래스 수만 조정)
 def get_model_instance(num_classes) :
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
 
-# device 설정
+# 디바이스 설정
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
-# 체크포인트 경로
+# 체크포인트 저장 경로
 checkpoint_dir = "/content/drive/MyDrive/Colab/ACK2025/olive/model"
 checkpoint_files = sorted(glob.glob(f"{checkpoint_dir}/*.pth"))
 
-# 클래스 수
+# 클래스 수 (배경 포함)
 num_classes = 3
 
-# mAP 평가
+# 각 체크포인트에 대해 mAP 평가 반복
 for checkpoint_path in checkpoint_files :
     # 모델 불러오기
     model = get_model_instance(num_classes).to(device)
+    # 체크포인트 로드 (map_location으로 CPU와 GPU 모두 대응)
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
-    model.eval()
+    model.eval() # 평가 모드 전환
 
-    # mAP 측정기 초기화
+    # mAP 측정기 초기화 (torchmetrics 라이브러리 사용)
     metric = MeanAveragePrecision()
+    # 검증셋으로 예측 수행 & metric 업데이트
     with torch.no_grad() :
         for images, targets in val_loader :
             images = [img.to(device) for img in images]
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-            outputs = model(images)
-            metric.update(outputs, targets)
+            outputs = model(images) # 예측 결과
+            metric.update(outputs, targets) # 정답이랑 같이 mAP 누적 계산
 
     # 결과 출력
     result = metric.compute()
     epoch_num = checkpoint['epoch']
     print(f"[Epoch {epoch_num:02d}] mAP : {result['map']:.4f}, mAP@50 : {result['map_50']:.4f}")
 
-# (7) mAP 평가 (테스트셋)
+____________________________________________________________________________________________________
+
+# mAP 평가 (테스트셋 - 단일 체크포인트)
 # 모델 생성
 def get_model_instance(num_classes) :
     model = fasterrcnn_resnet50_fpn(pretrained=False)
@@ -48,6 +52,8 @@ def get_model_instance(num_classes) :
     return model
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+# 평가할 체크포인트 지정
 checkpoint_path = "/content/drive/MyDrive/Colab/ACK2025/olive/model/250703_epoch_7.pth"
 num_classes = 3
 
@@ -57,8 +63,10 @@ checkpoint = torch.load(checkpoint_path, map_location=device)
 model.load_state_dict(checkpoint['model_state_dict'])
 model.eval()
 
-# mAP 평가
+# mAP 측정기 초기화
 metric = MeanAveragePrecision()
+
+# 테스트셋으로 평가
 with torch.no_grad() :
     for images, targets in test_loader :
         images = [img.to(device) for img in images]
