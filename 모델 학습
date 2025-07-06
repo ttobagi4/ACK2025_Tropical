@@ -2,6 +2,8 @@
 from google.colab import drive
 drive.mount('/content/drive')
 
+____________________________________________________________________________________________________
+
 # (2) 각종 라이브러리 임포트
 import os
 import json
@@ -25,23 +27,27 @@ from sklearn.metrics import precision_recall_curve, average_precision_score
 from tqdm import tqdm
 %matplotlib inline
 
+____________________________________________________________________________________________________
+
 # (3) 사용자 정의 Dataset 클래스 구현
-# root (str) : XML 라벨링 파일과 이미지가 있는 폴더 경로
-# transforms (callable, optional) : 이미지 전처리 & 변환 함수
+# XML 라벨링 파일을 읽어서 이미지와 바운딩 박스 정보를 추출
+# object detection 학습을 위한 형태로 데이터 세팅
 # {"olive": 1, "anthracnose": 2}
 class CustomDataset(Dataset) :
 
     def __init__(self, root, transforms=None, classes_mapping=None) :
-        self.root = root
+        self.root = root # 이미지와 XML 라벨 파일이 있는 디렉토리 경로
         self.transforms = transforms
-        self.xml_files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith('.xml')]
+        self.xml_files = [os.path.join(root, f) for f in os.listdir(root) if f.endswith('.xml')] # 모든 XML 파일 경로
 
+        # 클래스 이름 -> 숫자 라벨 매핑
         if classes_mapping is None :
             self.classes_mapping = {"olive": 1, "anthracnose": 2,}
         else :
             self.classes_mapping = classes_mapping
 
     def __len__(self) :
+        # 데이터셋의 크기 = XML 파일 갯수
         return len(self.xml_files)
 
     def __getitem__(self, idx) :
@@ -50,19 +56,20 @@ class CustomDataset(Dataset) :
         root_elem = tree.getroot()
 
         # 이미지 파일명 추출
+        # <filename> 태그에서 이미지 파일 이름 추출
         image_file = root_elem.find('filename').text.strip()
-        # 이미지 파일이 XML 파일과 같은 폴더 내에 있다고 가정
         img_path = os.path.join(self.root, image_file)
-        img = Image.open(img_path).convert("RGB")
-        boxes = []
-        labels = []
+        img = Image.open(img_path).convert("RGB") # RGB 형식으로 이미지 로딩
+        boxes = [] # 바운딩 박스 좌표 리스트
+        labels = [] # 클래스 라벨 리스트
 
-        # XML 파일의 모든 object 태그 처리 (객체마다 바운딩 박스 & 클래스 정보)
+        # <object> 태그 반복 (객체마다 바운딩 박스와 클래스 라벨 존재)
         for obj in root_elem.findall('object') :
-            name = obj.find('name').text.strip()
-            label_val = self.classes_mapping.get(name, 0)
+            name = obj.find('name').text.strip() # 클래스 이름
+            label_val = self.classes_mapping.get(name, 0) # 매핑된 숫자 라벨 (없으면 0으로) 
             labels.append(label_val)
 
+            # 바운딩 박스 좌표 추출
             bndbox = obj.find('bndbox')
             xmin = int(bndbox.find('xmin').text)
             ymin = int(bndbox.find('ymin').text)
@@ -73,10 +80,11 @@ class CustomDataset(Dataset) :
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
         labels = torch.as_tensor(labels, dtype=torch.int64)
 
-        image_id = torch.tensor([idx])
-        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
+        image_id = torch.tensor([idx]) # 이미지 고유 ID (인덱스 기준)
+        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) # 바운딩 박스 넓이 계산
         iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
 
+        # 모델 학습을 위한 target 딕셔너리 구성
         target = {
             "boxes" : boxes,
             "labels" : labels,
@@ -88,15 +96,15 @@ class CustomDataset(Dataset) :
         if self.transforms :
             img = self.transforms(img)
 
-        return img, target
+        return img, target # 이미지와 타겟 정보 반환
 
-# 변환 함수 설정 (학습 시와 검증/테스트 시 차이가 있을 수 있음)
+# 데이터 전처리를 위한 transform 함수
 def get_transform(train) :
     transforms = []
-    transforms.append(T.ToTensor())
+    transforms.append(T.ToTensor()) # PIL 이미지를 Tensor로 변환
     if train :
-        transforms.append(T.RandomHorizontalFlip(0.5))
-    return T.Compose(transforms)
+        transforms.append(T.RandomHorizontalFlip(0.5)) # 학습 시 좌우반전 (50% 확률로)
+    return T.Compose(transforms) # 변환들을 순차적으로 적용
 
 # 각 데이터셋 폴더 경로 설정
 train_path = "/content/drive/MyDrive/Colab/ACK2025/olive/train"
@@ -107,43 +115,77 @@ dataset_train = CustomDataset(train_path, transforms=get_transform(train=True))
 dataset_val   = CustomDataset(val_path, transforms=get_transform(train=False))
 dataset_test  = CustomDataset(test_path, transforms=get_transform(train=False))
 
-# DataLoader 생성 (object detection 모델은 collate_fn 필요함)
-# detection 모델은 이미지와 타겟이 리스트 형태로 묶여야 하므로, zip(*)으로 묶어서 반환
+# object detection에서는 custom collate_fn이 필요
+# 기본 collate는 텐서를 쌓는 방식인데, detection에서는 이미지와 target이 각각 다른 크기이므로 불가능
+# zip(*)을 이용해 이미지 리스트와 target 리스트로 묶어서 반환
 def collate_fn(batch) :
     return tuple(zip(*batch))
 
+# dataloader 구성
+# batch_size는 한 번에 처리할 이미지 개수
+# shuffle = true : 학습 데이터는 매 epoch마다 섞는다.
+# num_workers = 0 : 데이터 로딩 프로세스 수 (코랩에서는 0이 안전함)
 train_loader = DataLoader(dataset_train, batch_size=3, shuffle=True, num_workers=0, collate_fn=collate_fn)
 val_loader   = DataLoader(dataset_val, batch_size=3, shuffle=False, num_workers=0, collate_fn=collate_fn)
 test_loader  = DataLoader(dataset_test, batch_size=3, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
-# train_loader의 첫 배치에서 이미지와 타겟 정보 확인
+# train_loader에서 첫 배치 가져오기 (디버깅용)
+# images : 이미지 텐서 리스트
+# targets : 각 이미지에 대응하는 딕셔너리 리스트
 images, targets = next(iter(train_loader))
 print(f"Batch image type: {type(images[0])}, Batch target type: {type(targets[0])}")
 
+____________________________________________________________________________________________________
+
 # (4) torchvision의 사전학습된 Faster R-CNN 모델(ResNet-50 FPN 기반) 불러오기
+# 사용자 데이터셋에 맞게 출력 클래스를 조정하는 함수
 def get_model_instance_segmentation(num_classes) :
+    # 백본 : ResNet-50
+    # FPN : Feature Pyramid Network (다양한 해상도의 특징을 추출)
+    # pretrained = True : COCO 데이터셋으로 학습된 가중치 사용
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+
+    # 기존 출력 레이어 확인
+    # ROI head의 box classifier 부분 (클래스 분류기)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
+
+    # box_predictor (클래스 분류기 + 바운딩 박스 회귀기) 교체
+    # FastRCNNPredictor는 Pytorch가 제공하는 모듈
+    # 출력 클래스 수에 맞게 새로운 predicotr 생성
+    # num_classes : 클래스 수 (배경 포함 3개 : 배경, olive, anthracnose)
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
 
 # 클래스 매핑
 num_classes = 3
+# 사용자 정의 클래스 수로 모델 생성
 model = get_model_instance_segmentation(num_classes)
+# 모델을 GPU로 옮기기 (가능하면 CUDA 사용, 아니면 CPU)
 model.to(torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu'))
 
-# (5) 옵티마이저 및 학습
+____________________________________________________________________________________________________
+
+# (5) 학습
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 model.to(device)
 
-# 옵티마이저 & learning rate scheduler 설정
+# 옵티마이저 설정
+# SGD (확률적 경사 하강법) 사용
+# lr : 학습률, momentum : 관성, weight_decay : L2 정규화
 optimizer = optim.SGD(model.parameters(), lr=0.005, momentum=0.9, weight_decay=0.0005)
+
+# 학습률 스케줄러 설정
+# StepLR : 일정 에포크마다 학습률 감소
+# step_size = 3 : 매 3 에포크마다
+# gamma = 0.1 : 학습률을 10분의 1로 줄임
 lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
+# 체크포인트 디렉토리 및 변수 초기화
 checkpoint_dir = "/content/drive/MyDrive/Colab/ACK2025/olive/model"
 latest_checkpoint = None
 start_epoch = 0 # 기본적으로는 처음부터 학습하도록
 
+# 체크포인트(pth 파일) 불러오기 (학습 재시작)
 checkpoint_files = sorted(glob.glob(os.path.join(checkpoint_dir, "*.pth")))
 if checkpoint_files :
     latest_checkpoint = checkpoint_files[-1]  # 가장 마지막 에포크 파일
@@ -151,7 +193,7 @@ if checkpoint_files :
     model.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
-    start_epoch = checkpoint["epoch"]
+    start_epoch = checkpoint["epoch"] # 이어서 학습할 에포크 지정
     print(f"{start_epoch} 에포크부터 학습이 재개됩니다 🍄")
 else:
     print("체크포인트를 찾지 못했습니다! 학습이 처음부터 시작됩니다 🍃")
@@ -159,45 +201,47 @@ else:
 # 총 학습 에포크
 num_epochs = 40
 
+# 학습 루프
 for epoch in range(start_epoch, num_epochs) :
-    # 학습
-    model.train()
-    train_loss_total = 0.0
+    model.train() # 모델을 학습 모드로 전환
+    train_loss_total = 0.0 # 에포크 동안의 총 loss 초기화
 
+    # 학습 데이터 반복
     for images, targets in train_loader :
         images = [img.to(device) for img in images]
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         optimizer.zero_grad()
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values())
+        # 모델에 forward pass → loss 계산
+        loss_dict = model(images, targets) # 반환값 : dict (classification, box regression 등)
+        losses = sum(loss for loss in loss_dict.values()) # 모든 loss 합산
         train_loss_total += losses.item()
 
-        losses.backward()
-        optimizer.step()
+        losses.backward() # 역전파
+        optimizer.step() # 파라미터 업데이트
 
-    avg_train_loss = train_loss_total / len(train_loader)
+    avg_train_loss = train_loss_total / len(train_loader) # 평균 학습 손실 계산
 
     # 검증
-    model.eval()
+    model.eval() # 모델을 평가 모드로 전환
     val_loss_total = 0.0
-    with torch.no_grad() :
+    with torch.no_grad() : # 검증은 gradient 계산 없이 수행
         for images, targets in val_loader :
             images = [img.to(device) for img in images]
-            outputs = model(images)
+            outputs = model(images) # 추론 수행 (loss 없음)
 
     print(f"에포크 {epoch+1}/{num_epochs}  -  학습 loss: {avg_train_loss:.4f}")
 
-    # learning rate scheduler 업데이트
-    lr_scheduler.step()
+    # 학습률 업데이트
+    lr_scheduler.step() # 설정한 step_size마다 학습률 감소
 
-    # 모델 + 옵티마이저 + 학습률 스케줄러 - 같이 저장
+    # 체크포인트 저장 (모델 + 옵티마이저 + 학습률 스케줄러 같이)
     checkpoint_path = f"/content/drive/MyDrive/Colab/ACK2025/olive/model/250703_epoch_{epoch+1}.pth"
     torch.save({
         "epoch": epoch + 1,  # 바로 다음 에포크부터 시작할 수 있게
-        "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "lr_scheduler_state_dict": lr_scheduler.state_dict()
+        "model_state_dict": model.state_dict(),  # 모델 가중치
+        "optimizer_state_dict": optimizer.state_dict(), # 옵티마이저 상태
+        "lr_scheduler_state_dict": lr_scheduler.state_dict() # 스케줄러 상태
     }, checkpoint_path)
 
     print(f"{epoch+1} 에포크, 옵티마이저, 학습률 스케줄러가 저장되었습니다 🍀: {checkpoint_path}")
