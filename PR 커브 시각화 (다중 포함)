@@ -69,3 +69,187 @@ if __name__ == "__main__" :
     # 평가 및 PR 커브 시각화
     y_true, y_scores = evaluate_for_pr_curve(model, test_loader, device, iou_thresh=0.5)
     plot_pr_curve(y_true, y_scores, iou_thresh=0.5)
+
+____________________________________________________________________________________________________
+
+# PR 커브 (다중 모델)
+
+# 클래스 라벨 (모델ID_클래스ID → 그래프에 표시될 이름)
+CLASS_LABELS = {
+    "olive_1": "olive",
+    "olive_2": "anthracnose",
+    "passion_fruit_1": "passion_fruit",
+    "passion_fruit_2": "passion_thrips",
+    "mango_1": "mango",
+    "mango_2": "black",
+    "mango_3": "mango_thrips",
+}
+
+CLASS_COLORS = {
+    "olive_1": "olive",
+    "olive_2": "firebrick",
+    "passion_fruit_1": "mediumorchid",
+    "passion_fruit_2": "indigo",
+    "mango_1": "darkorange",
+    "mango_2": "black",
+    "mango_3": "saddlebrown",
+}
+
+# Pascal VOC 기반 커스텀 Dataset
+class VOCDataset(Dataset):
+    def __init__(self, xml_dir, root, classes_mapping, transforms=None):
+        self.xml_files = sorted([
+            os.path.join(xml_dir, f) for f in os.listdir(xml_dir) if f.endswith(".xml")
+        ])
+        self.root = root
+        self.classes_mapping = classes_mapping
+        self.transforms = transforms
+
+    def __getitem__(self, idx):
+        xml_path = self.xml_files[idx]
+        tree = ET.parse(xml_path)
+        root_elem = tree.getroot()
+
+        image_file = root_elem.find('filename').text.strip()
+        img_path = os.path.join(self.root, image_file)
+        img = Image.open(img_path).convert("RGB")
+
+        boxes = []
+        labels = []
+
+        for obj in root_elem.findall('object'):
+            name = obj.find('name').text.strip()
+            label_val = self.classes_mapping.get(name, 0)
+            labels.append(label_val)
+
+            bndbox = obj.find('bndbox')
+            xmin = int(bndbox.find('xmin').text)
+            ymin = int(bndbox.find('ymin').text)
+            xmax = int(bndbox.find('xmax').text)
+            ymax = int(bndbox.find('ymax').text)
+            boxes.append([xmin, ymin, xmax, ymax])
+
+        boxes = torch.as_tensor(boxes, dtype=torch.float32)
+        labels = torch.as_tensor(labels, dtype=torch.int64)
+        image_id = torch.tensor([idx])
+        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
+        iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64)
+
+        target = {
+            "boxes": boxes,
+            "labels": labels,
+            "image_id": image_id,
+            "area": area,
+            "iscrowd": iscrowd
+        }
+
+        if self.transforms:
+            img = self.transforms(img)
+
+        return img, target
+
+    def __len__(self):
+        return len(self.xml_files)
+
+# 모델 불러오기
+def get_model(num_classes, checkpoint_path, device):
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+    return model
+
+# 클래스별 PR 평가
+def evaluate_per_class_pr(model, data_loader, device, num_classes, iou_thresh=0.5, model_prefix=""):
+    model.eval()
+    class_results = {f"{model_prefix}_{i}": {"scores": [], "labels": []} for i in range(1, num_classes)}
+
+    with torch.no_grad():
+        for images, targets in tqdm(data_loader, desc=f"Evaluating {model_prefix}"):
+            images = [img.to(device) for img in images]
+            outputs = model(images)
+
+            for output, target in zip(outputs, targets):
+                pred_boxes = output['boxes'].cpu()
+                pred_scores = output['scores'].cpu().numpy()
+                pred_labels = output['labels'].cpu().numpy()
+                gt_boxes = target['boxes'].cpu()
+                gt_labels = target['labels'].cpu().numpy()
+
+                if len(pred_boxes) == 0:
+                    continue
+
+                ious = box_iou(pred_boxes, gt_boxes) if len(gt_boxes) > 0 else torch.zeros((len(pred_boxes), 0))
+                max_ious, max_idxs = (ious.max(dim=1) if len(gt_boxes) > 0 else (torch.zeros(len(pred_boxes)), torch.zeros(len(pred_boxes), dtype=torch.int64)))
+
+                for score, label, iou, gt_idx in zip(pred_scores, pred_labels, max_ious, max_idxs):
+                    if label == 0:
+                        continue
+                    class_id = f"{model_prefix}_{label}"
+                    is_tp = 1 if len(gt_boxes) > 0 and iou >= iou_thresh and label == gt_labels[gt_idx] else 0
+                    class_results[class_id]["scores"].append(score)
+                    class_results[class_id]["labels"].append(is_tp)
+
+    return class_results
+
+# PR 커브 시각화
+def plot_combined_pr_curves(all_class_results, iou_thresh=0.5):
+    plt.figure(figsize=(10, 8))
+    for class_id, data in all_class_results.items():
+        if len(data["labels"]) == 0:
+            continue
+        precision, recall, _ = precision_recall_curve(data["labels"], data["scores"])
+        ap = average_precision_score(data["labels"], data["scores"])
+        label = f"{CLASS_LABELS.get(class_id, class_id)} (AP={ap:.2f})"
+        color = CLASS_COLORS.get(class_id, None)  # 없는 경우 기본 색상 사용
+
+        plt.plot(recall, precision, marker='.', label=label, color=color)
+
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title(f"Combined PR Curves @ IoU {iou_thresh}")
+    plt.grid(True)
+    plt.legend(loc="lower left", fontsize=9)
+    plt.tight_layout()
+    plt.show()
+
+# 실행
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 예시 클래스 매핑
+    class_map_A = {"olive": 1, "anthracnose": 2}
+    class_map_B = {"passion": 1, "thrip": 2}
+    class_map_C = {"mango": 1, "black": 2, "thrip": 3}
+
+    # transforms 정의 (Tensor로 변환만 해도 충분)
+    test_transform = T.Compose([T.ToTensor()])
+
+
+    # 데이터셋 및 로더 생성
+    test_dataset_A = VOCDataset(xml_dir="/content/drive/MyDrive/Colab/ACK2025/olive/test", root="/content/drive/MyDrive/Colab/ACK2025/olive/test", classes_mapping=class_map_A, transforms=test_transform)
+    test_dataset_B = VOCDataset(xml_dir="/content/drive/MyDrive/Colab/ACK2025/passion_fruit/test", root="/content/drive/MyDrive/Colab/ACK2025/passion_fruit/test", classes_mapping=class_map_B, transforms=test_transform)
+    test_dataset_C = VOCDataset(xml_dir="/content/drive/MyDrive/Colab/ACK2025/mango/test", root="/content/drive/MyDrive/Colab/ACK2025/mango/test", classes_mapping=class_map_C, transforms=test_transform)
+
+    test_loader_A = DataLoader(test_dataset_A, batch_size=3, shuffle=False, collate_fn=lambda x: tuple(zip(*x)))
+    test_loader_B = DataLoader(test_dataset_B, batch_size=3, shuffle=False, collate_fn=lambda x: tuple(zip(*x)))
+    test_loader_C = DataLoader(test_dataset_C, batch_size=3, shuffle=False, collate_fn=lambda x: tuple(zip(*x)))
+
+    # 모델 및 로더 설정
+    models_info = [
+        ("olive", 3, "/content/drive/MyDrive/Colab/ACK2025/olive/model/250703_epoch_7.pth", test_loader_A),
+        ("passion_fruit", 3, "/content/drive/MyDrive/Colab/ACK2025/passion_fruit/model/250711_epoch_6.pth", test_loader_B),
+        ("mango", 4, "/content/drive/MyDrive/Colab/ACK2025/mango/model/250720_epoch_19.pth", test_loader_C),
+    ]
+
+    combined_results = {}
+    for model_prefix, num_classes, ckpt_path, loader in models_info:
+        model = get_model(num_classes, ckpt_path, device)
+        class_results = evaluate_per_class_pr(model, loader, device, num_classes, iou_thresh=0.5, model_prefix=model_prefix)
+        combined_results.update(class_results)
+
+    # PR 커브 시각화
+    plot_combined_pr_curves(combined_results, iou_thresh=0.5)
