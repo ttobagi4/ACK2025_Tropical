@@ -1,65 +1,93 @@
-# 과실 전체 영역 따기
-# 1. 이미지 불러오기
-# 2. GrabCut을 위한 준비 단계
-# 3. GrabCut에 사용할 ROI(관심영역) 설정
-# 4. GrabCut 알고리즘 실행
-# 5. 결과 마스크로 전경(주인공) 픽셀만 남기기
-# 6. 결과 출력
+from google.colab import drive
+drive.mount('/content/drive')
+
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+
+____________________________________________________________________________________________________
 
 # 이미지 불러오기
-# 이미지 파일을 BGR 형식으로 읽어온다. (OpenCV 기본형식이 BGR)
-img = cv2.imread("/content/drive/MyDrive/Colab/ACK2025/olive/OpenCV_data/N_3.png")
-# OpenCV의 BGR 이미지를 RGB로 변환 (matplotlib에서는 RGB가 기본형식이기 때문에)
+img = cv2.imread("/content/drive/MyDrive/Colab/ACK2025/olive/OpenCV_data/D_1.png")
 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-# GrabCut을 위한 준비 단계
-# GrabCut 알고리즘에 사용할 마스크 생성 (0 : 배경, 1 : 전경, 2 : 아마도 배경, 3 : 아마도 전경)
+# GrabCut으로 과실 전체 영역 추출
 mask = np.zeros(img.shape[:2], np.uint8)
-# GrabCut 내부 계산에 사용할 임시 모델 배열 (배경, 전경 각각)
-bgdModel = np.zeros((1, 65), np.float64) # 배경 모델
-fgdModel = np.zeros((1, 65), np.float64) # 전경 모델
+bgdModel = np.zeros((1, 65), np.float64)
+fgdModel = np.zeros((1, 65), np.float64)
 
-# 이미지 크기 가져오기 (이미지의 세로와 가로 크기를 얻는다.)
 height, width = img.shape[:2]
-
-# GrabCut에 사용할 ROI(관심영역) 설정
-# 바운딩 박스로 객체 검출하여 그 내부를 불러오면, 이미지에 과실이 거의 꽉 차 있으므로 가장자리를 5%씩 남기고 사각형 설정
-margin_x = int(width * 0.05) # 좌우 여백 (5%)
-margin_y = int(height * 0.05) # 상하 여백 (5%)
-# ROI 사각형 정의 : (x, y, w, h)
-# 이 사각형 내부를 전경으로 가정하고 GrabCut이 분할을 수행
+margin_x = int(width * 0.05)
+margin_y = int(height * 0.05)
 rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
 
-# GrabCut 알고리즘 실행
-# GrabCut 수행 (5번 반복)
-# 초기화 방법 : 사각형(rect) 기반으로 전경과 배경 추정
 cv2.grabCut(img, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
-
-# 결과 마스크로 전경 픽셀만 남기기
-# GrabCut 결과 마스크는 다음과 같은 값을 가진다 :
-# 0 : 확실한 배경 (background)
-# 1 : 확실한 전경 (foreground)
-# 2 : 아마 배경일 가능성이 높음 (probable background)
-# 3 : 아마 전경일 가능성이 높음 (probable foreground)
-# 전경(1, 3)을 1로, 나머지(0, 2)를 0으로 설정해서 최종 마스크 생성
 mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
-# 원본 이미지에 마스크를 적용하여 전경만 남기고 배경 제거
-# RGB 이미지에 전경 마스크를 곱해 과실 부분만 추출한다.
-result = img_rgb * mask2[:, :, np.newaxis] # 마스크에 채널 차원을 맞춰준다.
+fruit_only = img_rgb * mask2[:, :, np.newaxis]
+
+# HSV 변환
+hsv = cv2.cvtColor(fruit_only, cv2.COLOR_RGB2HSV)
+hue = hsv[:, :, 0]
+
+# 과실 영역 마스크 생성
+fruit_mask = np.any(fruit_only != 0, axis=-1).astype(np.uint8)
+
+# 병징 영역 후보 (과실 영역 중 녹색이 아닌 부분)
+green_lower = 25
+green_upper = 95
+non_green_mask = ((hue < green_lower) | (hue > green_upper)) & (fruit_mask == 1)
+
+# 병징 마스크 생성
+disease_mask = np.zeros_like(fruit_mask, dtype=np.uint8)
+disease_mask[non_green_mask] = 255
+
+# Morphological 연산
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_OPEN, kernel)
+disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_CLOSE, kernel)
+
+# 병징 영역의 이미지 생성
+disease_only = fruit_only.copy()
+disease_only[disease_mask == 0] = 0
+
+# 병징이 나타난 비율(%) 계산
+total_pixels = cv2.countNonZero(fruit_mask)
+disease_pixels = cv2.countNonZero(disease_mask)
+disease_ratio = (disease_pixels / total_pixels) * 100 if total_pixels > 0 else 0
+
+# 심각도 판별
+if disease_ratio < 1 :
+    severity = "매우 경미"
+elif disease_ratio < 5 :
+    severity = "경미"
+elif disease_ratio < 15 :
+    severity = "중간"
+else :
+    severity = "심각"
 
 # 결과 출력
-# 시각화용 도화지(?) 생성
-plt.figure(figsize=(12, 6))
-# 원본 이미지 출력
-plt.subplot(1, 2, 1)
-plt.title('Original Image') # 제목
-plt.imshow(img_rgb) # RGB 이미지(원본) 출력
-plt.axis('off') # 축 제거
+print(f"총 과실 픽셀 수 : {total_pixels}")
+print(f"병징 픽셀 수 : {disease_pixels}")
+print(f"병징이 나타난 비율 : {disease_ratio:.2f}%")
+print(f"심각도 : {severity}")
 
-# GrabCut 결과 이미지 출력
-plt.subplot(1, 2, 2)
-plt.title('Object Only')
-plt.imshow(result) # 전경만 추출된 이미지 출력
-plt.axis('off') # 축 제거
-# 두 이미지 함께 보여주기
+# 이미지 시각화
+plt.figure(figsize=(15, 5))
+
+plt.subplot(1, 3, 1)
+plt.title("Fruit (GrabCut)")
+plt.imshow(fruit_only)
+plt.axis("off")
+
+plt.subplot(1, 3, 2)
+plt.title("Disease Mask")
+plt.imshow(disease_mask, cmap="gray")
+plt.axis("off")
+
+plt.subplot(1, 3, 3)
+plt.title(f"Disease Area")
+plt.imshow(disease_only)
+plt.axis("off")
+
+plt.tight_layout()
 plt.show()
