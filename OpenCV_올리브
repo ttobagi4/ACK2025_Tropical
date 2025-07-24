@@ -8,70 +8,138 @@ from matplotlib import pyplot as plt
 ____________________________________________________________________________________________________
 
 # 이미지 불러오기
+# OpenCV는 기본적으로 BGR로 이미지를 불러오기 때문에 RGB로 변환해준다.
 img = cv2.imread("/content/drive/MyDrive/Colab/ACK2025/olive/OpenCV_data/D_1.png")
 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 # GrabCut으로 과실 전체 영역 추출
+# GrabCut : 초기 사각형(Rectangle) 영역을 기준으로 전경/배경을 분리하는 알고리즘
+# 과실이 사진 중앙에 위치해 있으므로, 가장자리를 제외한 넓은 범위를 ROI로 지정해준다.
 mask = np.zeros(img.shape[:2], np.uint8)
-bgdModel = np.zeros((1, 65), np.float64)
-fgdModel = np.zeros((1, 65), np.float64)
+bgdModel = np.zeros((1, 65), np.float64) # 배경 모델
+fgdModel = np.zeros((1, 65), np.float64) # 전경 모델
 
 height, width = img.shape[:2]
-margin_x = int(width * 0.05)
-margin_y = int(height * 0.05)
+margin_x = int(width * 0.05) # 가로 방향 여백
+margin_y = int(height * 0.05) # 세로 방향 여백
 rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
 
+# GrabCut 실행
 cv2.grabCut(img, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
-mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
-fruit_only = img_rgb * mask2[:, :, np.newaxis]
 
-# HSV 변환
+# GrabCut 결과 마스크를 기반으로 과실만 추출
+# 0, 2 → 배경 / 1, 3 → 전경 (1 : 확정, 3 : 추정)
+mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
+fruit_only = img_rgb * mask2[:, :, np.newaxis] # 전경(과실)만 남기기
+
+# HSV 색 공간 변환
+# 색상 정보(Hue)를 쉽게 분리하기 위해 HSV로 변환한다.
 hsv = cv2.cvtColor(fruit_only, cv2.COLOR_RGB2HSV)
-hue = hsv[:, :, 0]
+hue = hsv[:, :, 0] # H값만 추출
 
 # 과실 영역 마스크 생성
+# RGB 값이 모두 0이 아닌 부분만 과실로 간주한다. (배경은 제외)
 fruit_mask = np.any(fruit_only != 0, axis=-1).astype(np.uint8)
 
-# 병징 영역 후보 (과실 영역 중 녹색이 아닌 부분)
+# 병징 후보 검출 : 과실 내에서 녹색이 아닌 색상 영역
+# 일반적으로 녹색은 Hue 값 25~95 사이에 위치한다.
 green_lower = 25
 green_upper = 95
 non_green_mask = ((hue < green_lower) | (hue > green_upper)) & (fruit_mask == 1)
 
-# 병징 마스크 생성
+# 병징 마스크 생성 (255 : 병징 의심, 0 : 정상)
 disease_mask = np.zeros_like(fruit_mask, dtype=np.uint8)
 disease_mask[non_green_mask] = 255
 
 # Morphological 연산
+# 노이즈 제거와 연결된 병징 영역을 자연스럽게 보이게 하기 위해 수행하는 과정임. (노이즈 제거라고 생각하면 됨)
 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_OPEN, kernel)
-disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_CLOSE, kernel)
+disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_OPEN, kernel) # 작은 점들 제거
+disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_CLOSE, kernel) # 빈틈 메우기
 
-# 병징 영역의 이미지 생성
+# 병징 영역 시각화
+# 병징 마스크를 이용해 병징 영역만 남기고 나머지는 제거한다.
 disease_only = fruit_only.copy()
 disease_only[disease_mask == 0] = 0
 
-# 병징이 나타난 비율(%) 계산
+# 병징률(%) 계산
+# 과실 전체 픽셀 대비 병징 픽셀 비율 구하기
 total_pixels = cv2.countNonZero(fruit_mask)
 disease_pixels = cv2.countNonZero(disease_mask)
 disease_ratio = (disease_pixels / total_pixels) * 100 if total_pixels > 0 else 0
 
-# 심각도 판별
+# 심각도 판별 (4단계)
+# 병징영역이 차지하는 비율에 따라 Very Mild ~ Severe로 구분
 if disease_ratio < 1 :
-    severity = "매우 경미"
+    severity = "Very Mild"
 elif disease_ratio < 5 :
-    severity = "경미"
+    severity = "Mild"
 elif disease_ratio < 15 :
-    severity = "중간"
+    severity = "Moderate"
 else :
-    severity = "심각"
+    severity = "Severe"
+
+# 병징 색상 분석
+# 병징의 색상 정보를 수치로 분석 (LAB 색공간)
+def analyze_disease_color_stats(disease_only, disease_mask) :
+    # 병징 마스크에 해당하는 RGB 픽셀만 추출
+    masked_pixels = disease_only[disease_mask == 255]
+
+    if len(masked_pixels) == 0 :
+        print("병징 픽셀이 없어 색상 분석 불가능")
+        return None
+
+    # LAB 색공간으로 변환 (밝기/색차 분석에 적합함)
+    lab_pixels = cv2.cvtColor(masked_pixels.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+    L_vals, A_vals, B_vals = lab_pixels[:, 0], lab_pixels[:, 1], lab_pixels[:, 2]
+
+    # 각 채널의 평균 및 표준편차 계산
+    stats = {
+        "L_mean": np.mean(L_vals),
+        "L_std": np.std(L_vals),
+        "A_mean": np.mean(A_vals),
+        "A_std": np.std(A_vals),
+        "B_mean": np.mean(B_vals),
+        "B_std": np.std(B_vals),
+    }
+
+    L_brightness = stats["L_mean"]
+    L_variation = stats["L_std"]
+    analysis_text = ""
+
+    # 밝기 수준에 따른 병의 진행 정도 추정
+    if L_brightness > 170 :
+        stage = "매우 밝음 (초기 or 비병징 가능성)"
+    elif L_brightness > 130 :
+        stage = "중간 밝기 (병의 초기 진행 가능성)"
+    elif L_brightness > 90 :
+        stage = "다소 어두움 (병징이 어느 정도 진행됨)"
+    else :
+        stage = "어두운 병징 (후기 or 심화 추정)"
+
+    variation_note = "균일함" if L_variation < 10 else "색상 범위가 다양함"
+
+    # 분석 결과 출력
+    analysis_text += f"- 평균 밝기 (L): {L_brightness:.1f} → {stage}\n"
+    analysis_text += f"- 밝기 분산 : {L_variation:.1f} → {variation_note}\n"
+    analysis_text += f"- LAB 평균 색상(참고) a* : {stats['A_mean']:.1f}, b* : {stats['B_mean']:.1f} (색상 정보)\n"
+
+    return analysis_text, stats
+
+# 병징 색상 분석 실행
+analysis_text, stats = analyze_disease_color_stats(disease_only, disease_mask)
+if analysis_text:
+    print("\n[병징 색상 분석 결과]")
+    print(analysis_text)
 
 # 결과 출력
-print(f"총 과실 픽셀 수 : {total_pixels}")
-print(f"병징 픽셀 수 : {disease_pixels}")
-print(f"병징이 나타난 비율 : {disease_ratio:.2f}%")
-print(f"심각도 : {severity}")
+print(f"- 총 과실 픽셀 수: {total_pixels}")
+print(f"- 병징 픽셀 수: {disease_pixels}")
+print(f"- 병징률: {disease_ratio:.2f}%")
+print(f"- 심각도 판단: {severity}")
 
-# 이미지 시각화
+# 시각화
+# 과실, 병징 마스크, 병징만 남긴 이미지 순서대로 출력
 plt.figure(figsize=(15, 5))
 
 plt.subplot(1, 3, 1)
@@ -85,7 +153,7 @@ plt.imshow(disease_mask, cmap="gray")
 plt.axis("off")
 
 plt.subplot(1, 3, 3)
-plt.title(f"Disease Area")
+plt.title(f"Disease Area\n({disease_ratio:.2f}% / {severity})")
 plt.imshow(disease_only)
 plt.axis("off")
 
