@@ -20,7 +20,7 @@ bgdModel = np.zeros((1, 65), np.float64) # 배경 모델
 fgdModel = np.zeros((1, 65), np.float64) # 전경 모델
 
 height, width = img.shape[:2]
-margin_x = int(width * 0.05) # 가로 방향 여백
+margin_x = int(width * 0.04) # 가로 방향 여백
 margin_y = int(height * 0.05) # 세로 방향 여백
 rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
 
@@ -172,7 +172,7 @@ bgdModel = np.zeros((1, 65), np.float64)
 fgdModel = np.zeros((1, 65), np.float64)
 
 height, width = img.shape[:2]
-margin_x = int(width * 0.05)
+margin_x = int(width * 0.04)
 margin_y = int(height * 0.05)
 rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
 
@@ -192,14 +192,14 @@ A_mean = np.mean(lab_pixels[:, 1])
 B_mean = np.mean(lab_pixels[:, 2])
 
 # 숙성도 판별 (기준은 실험적으로 조정할 수 있음)
-if L_mean > 150 and A_mean < 125 and B_mean > 135 :
-    maturity = "Green"          # 그린 올리브, 밝고 녹색 계열
-elif 120 < L_mean <= 160 and A_mean >= 125 and B_mean < 135 :
-    maturity = "Turn Color"     # 턴컬러 올리브, 자주/갈색 계열
-elif L_mean <= 120 and A_mean < 130 and B_mean < 130 :
-    maturity = "Black"          # 블랙 올리브, 어둡고 붉은기 줄어듦
+if 125 <= L_mean <= 195 and A_mean < 110 and B_mean >= 165 :
+    maturity = "Immature" # 미숙 (그린 올리브, 밝고 녹색 계열)
+elif 92 <= L_mean <= 125 and A_mean >= 115 and B_mean >= 135 :
+    maturity = "Mature" # 중간 성숙 (턴컬러 올리브, 자주/갈색 계열)
+elif L_mean < 92 and A_mean >= 127.5 and B_mean <= 130 :
+    maturity = "Ripe" # 완숙 (블랙 올리브, 어둡고 붉은기 줄어듦)
 else :
-    maturity = "Uncertain"      # 경계값이 애매한 경우
+    maturity = "Uncertain" # 경계값이 애매한 경우
 
 # 결과 출력
 print("[숙성도 분석 결과]")
