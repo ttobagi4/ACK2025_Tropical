@@ -17,7 +17,7 @@ bgdModel = np.zeros((1, 65), np.float64)
 fgdModel = np.zeros((1, 65), np.float64)
 
 height, width = img.shape[:2]
-margin_x = int(width * 0.05)
+margin_x = int(width * 0.04)
 margin_y = int(height * 0.04)
 rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
 
@@ -37,12 +37,12 @@ A_mean = np.mean(lab_pixels[:, 1])
 B_mean = np.mean(lab_pixels[:, 2])
 
 # 숙성도 판별 (기준은 실험적으로 조정할 수 있음)
-if L_mean >= 160 and A_mean < 125 and B_mean > 130 :
-    maturity = "Unripe" # 미성숙 (연녹색 ~ 중간 녹색)
-elif 100 < L_mean < 160 and 125 <= A_mean <= 145 and 110 <= B_mean <= 155 :
-    maturity = "Pre-ripe" # 성숙 직전 (짙은 녹색 ~ 자주빛이 감돌기 시작함)
-elif L_mean <= 100 and A_mean > 140 and B_mean < 110 :
-    maturity = "Fully ripe" # 완숙 (짙은 자주색 ~ 보라색)
+if L_mean >= 140 and A_mean < 110 and B_mean >= 170 :
+    maturity = "Immature" # 미숙 (연녹색 ~ 중간 녹색)
+elif 100 < L_mean < 140 and 125 <= A_mean <= 145 and 140 <= B_mean <= 160 :
+    maturity = "Mature" # 중간 성숙 (짙은 녹색 ~ 자주빛이 감돌기 시작함)
+elif L_mean <= 100 and A_mean > 140 and B_mean < 130 :
+    maturity = "Ripe" # 완숙 (짙은 자주색 ~ 보라색)
 else:
     maturity = "Uncertain"
 
