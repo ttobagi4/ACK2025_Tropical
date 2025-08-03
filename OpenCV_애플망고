@@ -7,6 +7,58 @@ from matplotlib import pyplot as plt
 
 ____________________________________________________________________________________________________
 
+# 이미지 불러오기 및 RGB 변환
+image_path = "/content/drive/MyDrive/Colab/ACK2025/mango/OpenCV_data/B_3.JPG"
+img = cv2.imread(image_path)
+
+if img is None :
+    print("이미지 로드 실패!")
+    exit()
+else :
+    print("이미지 로드 성공!")
+
+img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# GrabCut으로 과실 전체 추출
+mask = np.zeros(img.shape[:2], np.uint8)
+bgdModel = np.zeros((1, 65), np.float64)
+fgdModel = np.zeros((1, 65), np.float64)
+
+height, width = img.shape[:2]
+margin_x = int(width * 0.05)
+margin_y = int(height * 0.04)
+rect = (margin_x, margin_y, width - 2 * margin_x, height - 2 * margin_y)
+
+cv2.grabCut(img, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')  # 과실 영역 : 1
+fruit_only = img * mask2[:, :, np.newaxis]
+
+# 과실 영역 크기 조정 및 HSV 변환
+resized_fruit = cv2.resize(fruit_only, (512, 512))
+hsv_fruit = cv2.cvtColor(resized_fruit, cv2.COLOR_BGR2HSV)
+
+# 병징 색상 범위 정의
+lower_black = np.array([0, 0, 0])
+upper_black = np.array([180, 255, 40])
+
+lower_brown = np.array([10, 100, 30])
+upper_brown = np.array([20, 255, 160])
+
+# 병징 마스크 생성
+mask_black = cv2.inRange(hsv_fruit, lower_black, upper_black)
+mask_brown = cv2.inRange(hsv_fruit, lower_brown, upper_brown)
+disease_mask = cv2.bitwise_or(mask_black, mask_brown)
+
+# 병징 영역 추출
+disease_area = cv2.bitwise_and(resized_fruit, resized_fruit, mask=disease_mask)
+
+# 시각화
+cv2_imshow(resized_fruit)       # 과실만 포함된 이미지
+cv2_imshow(disease_mask)        # 병징 마스크
+cv2_imshow(disease_area)        # 병징 색상만 추출된 결과
+
+____________________________________________________________________________________________________
+
 # 이미지 불러오기
 img = cv2.imread("/content/drive/MyDrive/Colab/ACK2025/mango/OpenCV_data/N_3.JPG")
 img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
