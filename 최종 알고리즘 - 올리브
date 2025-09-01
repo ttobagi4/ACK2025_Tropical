@@ -1,0 +1,269 @@
+import os
+import sys
+import cv2
+import numpy as np
+import torch
+import torchvision
+import torchvision.transforms as T
+from PIL import Image
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+
+
+# 사용자 설정
+CHECKPOINT_PATH = "/content/drive/MyDrive/Colab/ACK2025/olive/model/250703_epoch_7.pth"
+CLASS_NAMES     = ["__background__", "olive", "anthracnose"]
+IMAGE_PATH      = "/content/drive/MyDrive/Colab/ACK2025/final_test_img/olive_D.JPG"
+
+SCORE_THRESHOLD = 0.9        # IoU (좀 타이트하게 잡아놓음)
+GRABCUT_ITERS   = 5          # GrabCut 반복 횟수
+MARGIN_X_RATIO  = 0.04       # GrabCut 초기 사각형 여백 비율 (가로)
+MARGIN_Y_RATIO  = 0.05       # GrabCut 초기 사각형 여백 비율 (세로)
+
+# HSV에서 '녹색' 범위 (병징은 비녹색으로 가정하여 마스크 생성함)
+GREEN_H_LO, GREEN_H_HI = 25, 95
+
+# 모폴로지 커널 크기 (작은 노이즈 제거 + 빈틈 메우기용)
+MORPH_KERNEL_SIZE = (3, 3)
+
+
+# 공통 알고리즘
+def load_model(checkpoint_path: str, class_names: list, device: torch.device) -> torch.nn.Module:
+    # Faster R-CNN 모델 생성 후 체크포인트 가중치 로드
+    num_classes = len(class_names)
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=False)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"체크포인트를 찾지 못했습니다ㅠㅠ: {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    model.load_state_dict(state_dict)
+
+    model.to(device).eval()
+    return model
+
+def preprocess_image(image_path: str):
+    # 이미지 RGB로 로드하고 (모델 입력용 텐서, 시각화용 PIL) 쌍 반환
+    image = Image.open(image_path).convert("RGB")
+    transform = T.Compose([T.ToTensor()])
+    return transform(image), image
+
+def visualize_detections(img_pil: Image.Image,
+                         boxes, labels, scores,
+                         class_names,
+                         threshold: float = SCORE_THRESHOLD) -> None:
+    # 원본 이미지 위에 바운딩 박스 그리고, 클래스명만 표시
+    fig, ax = plt.subplots(1, figsize=(12, 8))
+    ax.imshow(img_pil)
+    shown = 0
+
+    for box, label, score in zip(boxes, labels, scores):
+        if float(score) < threshold:
+            continue
+
+        xmin, ymin, xmax, ymax = [float(v) for v in box.tolist()]
+        ax.add_patch(
+            patches.Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
+                              linewidth=2, edgecolor='r', facecolor='none')
+        )
+
+        name = class_names[int(label)] if 0 <= int(label) < len(class_names) else f"id:{int(label)}"
+        ax.text(xmin, max(ymin - 5, 0), name, color='white',
+                bbox=dict(facecolor='red', alpha=0.5))
+        shown += 1
+
+    ax.axis('off')
+    ax.set_title(f"Detections (threshold={threshold}) - {shown} shown")
+    plt.show()
+
+def extract_roi_crops(img_pil: Image.Image,
+                      boxes, labels, scores,
+                      class_names,
+                      threshold: float = SCORE_THRESHOLD):
+    # 임계값 이상 검출들만 선택해서 ROI 추출
+    w, h = img_pil.size
+    rois = []
+
+    for box, label, score in zip(boxes, labels, scores):
+        if float(score) < threshold:
+            continue
+
+        # 좌표를 이미지 범위로 클램프하고 최소 크기 보장
+        xmin, ymin, xmax, ymax = [int(round(v)) for v in box.tolist()]
+        xmin = max(0, min(xmin, w - 1))
+        ymin = max(0, min(ymin, h - 1))
+        xmax = max(xmin + 1, min(xmax, w))
+        ymax = max(ymin + 1, min(ymax, h))
+
+        crop_pil = img_pil.crop((xmin, ymin, xmax, ymax))
+        name = class_names[int(label)] if 0 <= int(label) < len(class_names) else f"id:{int(label)}"
+
+        rois.append({
+            "label_id": int(label),
+            "label_name": name,
+            "box": (xmin, ymin, xmax, ymax),
+            "crop_pil": crop_pil
+        })
+    return rois
+# 점수를 완전히 제외한 텍스트 결과 생성
+# [i] 클래스명 (box=(xmin, ymin, xmax, ymax))
+def text_report_from_rois(rois: list) -> str:
+    if not rois:
+        return "감지된 객체가 없습니다ㅠㅠ"
+
+    lines = []
+    uniq = []
+    for i, r in enumerate(rois, 1):
+        if r["label_name"] not in uniq:
+            uniq.append(r["label_name"])
+        xmin, ymin, xmax, ymax = r["box"]
+        lines.append(f"[{i}] {r['label_name']} (box={xmin,ymin,xmax,ymax})")
+
+    return "감지 상세:\n" + "\n".join(lines) + f"\n감지 클래스(중복 제거): {', '.join(uniq)}"
+
+
+# ROI 공통 처리
+# ROI 내에서 GrabCut으로 과실만 추출
+# 반환 : (fruit_only_rgb, fruit_mask_uint8)
+# fruit_only_rgb: 배경이 0으로 제거된 RGB 이미지
+# fruit_mask: 전경(과실)=1, 배경=0 의 uint8 마스크
+def _grabcut_fruit_only(rgb_img: np.ndarray,
+                        margin_x_ratio: float = MARGIN_X_RATIO,
+                        margin_y_ratio: float = MARGIN_Y_RATIO,
+                        iters: int = GRABCUT_ITERS):
+
+    # GrabCut은 BGR 사용하므로 복사본을 BGR로 변환
+    bgr = cv2.cvtColor(rgb_img, cv2.COLOR_RGB2BGR)
+
+    mask = np.zeros(bgr.shape[:2], np.uint8)
+    bgdModel = np.zeros((1, 65), np.float64)
+    fgdModel = np.zeros((1, 65), np.float64)
+
+    h, w = bgr.shape[:2]
+    mx = int(w * margin_x_ratio)
+    my = int(h * margin_y_ratio)
+    rect = (mx, my, w - 2 * mx, h - 2 * my)  # (x, y, width, height)
+
+    cv2.grabCut(bgr, mask, rect, bgdModel, fgdModel, iters, cv2.GC_INIT_WITH_RECT)
+
+    mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
+    fruit_only = rgb_img * mask2[:, :, np.newaxis]
+    fruit_mask = (np.any(fruit_only != 0, axis=-1)).astype(np.uint8)
+
+    return fruit_only, fruit_mask
+
+
+# 클래스별 ROI 분석
+def analyze_olive_maturity_from_roi(roi_pil: Image.Image):
+    roi_rgb = np.array(roi_pil)
+
+    # GrabCut으로 과실만 분리
+    fruit_only, fruit_mask = _grabcut_fruit_only(roi_rgb)
+
+    # 과실 픽셀들에 대해 LAB 평균 계산
+    masked_pixels = fruit_only[fruit_mask == 1]
+    if masked_pixels.size == 0:
+        maturity = "Uncertain"
+        L_mean = A_mean = B_mean = np.nan
+    else:
+        lab = cv2.cvtColor(masked_pixels.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+        L_mean, A_mean, B_mean = map(float, (np.mean(lab[:, 0]), np.mean(lab[:, 1]), np.mean(lab[:, 2])))
+
+        # 기준에 따라 숙성도 판별
+        if 125 <= L_mean <= 195 and A_mean < 110 and B_mean >= 165:
+            maturity = "Immature"
+        elif 92 <= L_mean <= 125 and A_mean >= 115 and B_mean >= 135:
+            maturity = "Mature"
+        elif L_mean < 92 and A_mean >= 127.5 and B_mean <= 130:
+            maturity = "Ripe"
+        else:
+            maturity = "Uncertain"
+
+    # 시각화 + 결과 출력
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1); plt.title("Original ROI"); plt.imshow(roi_rgb); plt.axis("off")
+    plt.subplot(1, 2, 2); plt.title(f"Fruit (GrabCut) — Maturity: {maturity}")
+    plt.imshow(fruit_only); plt.axis("off"); plt.tight_layout(); plt.show()
+
+    print("[숙성도 분석 결과]")
+    print(f"- 평균 L (밝기): {L_mean:.1f}")
+    print(f"- 평균 a* (녹→적): {A_mean:.1f}")
+    print(f"- 평균 b* (청→황): {B_mean:.1f}")
+    print(f"- 숙성도 판단: {maturity}")
+
+    return {"maturity": maturity, "L_mean": L_mean, "A_mean": A_mean, "B_mean": B_mean}
+
+def analyze_anthracnose_from_roi(roi_pil: Image.Image):
+    roi_rgb = np.array(roi_pil)
+
+    # GrabCut으로 과실만 분리
+    fruit_only, fruit_mask = _grabcut_fruit_only(roi_rgb)
+
+    # HSV 변환 후 '비녹색' 영역을 병징 후보로 생성
+    hsv = cv2.cvtColor(fruit_only, cv2.COLOR_RGB2HSV)
+    hue = hsv[:, :, 0]
+    non_green = ((hue < GREEN_H_LO) | (hue > GREEN_H_HI)) & (fruit_mask == 1)
+
+    disease_mask = np.zeros_like(fruit_mask, dtype=np.uint8)
+    disease_mask[non_green] = 255
+
+    # 모폴로지 연산으로 노이즈 제거 + 빈틈 메우기
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, MORPH_KERNEL_SIZE)
+    disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_OPEN, kernel)
+    disease_mask = cv2.morphologyEx(disease_mask, cv2.MORPH_CLOSE, kernel)
+
+    # 병징 영역만 남긴 RGB
+    disease_only = fruit_only.copy()
+    disease_only[disease_mask == 0] = 0
+
+    # 병징률(%) 및 심각도 산출
+    total_pixels   = int(cv2.countNonZero(fruit_mask))
+    disease_pixels = int(cv2.countNonZero(disease_mask))
+    disease_ratio  = (disease_pixels / total_pixels) * 100 if total_pixels > 0 else 0.0
+
+    if disease_ratio < 1:
+        severity = "Very Mild"
+    elif disease_ratio < 5:
+        severity = "Mild"
+    elif disease_ratio < 15:
+        severity = "Moderate"
+    else:
+        severity = "Severe"
+
+    # 병징 픽셀에 대한 LAB 색상 통계
+    analysis_text = "병징 픽셀이 없어 색상 분석 불가능"
+    lab_stats = {}
+
+    masked_pixels = disease_only[disease_mask == 255]
+    if masked_pixels.size > 0:
+        lab = cv2.cvtColor(masked_pixels.reshape(-1, 1, 3), cv2.COLOR_RGB2LAB).reshape(-1, 3)
+        L_vals, A_vals, B_vals = lab[:, 0], lab[:, 1], lab[:, 2]
+        lab_stats = {
+            "L_mean": float(np.mean(L_vals)), "L_std": float(np.std(L_vals)),
+            "A_mean": float(np.mean(A_vals)), "A_std": float(np.std(A_vals)),
+            "B_mean": float(np.mean(B_vals)), "B_std": float(np.std(B_vals)),
+        }
+
+        L_brightness = lab_stats["L_mean"]
+        L_variation  = lab_stats["L_std"]
+
+        if L_brightness > 170: stage = "매우 밝음 (초기 or 비병징 가능성)"
+        elif L_brightness > 130: stage = "중간 밝기 (병의 초기 진행 가능성)"
+        elif L_brightness > 90:  stage = "다소 어두움 (병징 진행)"
+        else:                    stage = "어두운 병징 (후기 or 심화 추정)"
+
+        variation_note = "균일함" if L_variation < 10 else "색상 범위 다양"
+
+        analysis_text = (
+            f"- 평균 밝기 (L): {L_brightness:.1f} → {stage}\n"
+            f"- 밝기 분산: {L_variation:.1f} → {variation_note}\n"
+            f"- LAB 평균 a*: {lab_stats['A_mean']:.1f}, b*: {lab_stats['B_mean']:.1f}\n"
+        )
+
+    # 시각화 및 결과 출력
+    plt.figure(figsize=(15, 5))
+    plt.subplot(1, 3, 1);
