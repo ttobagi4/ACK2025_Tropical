@@ -40,13 +40,15 @@
 - Immature(미숙), Mature(중간), Ripe(완숙), Uncertain(불확실) 4단계로 분류
 - 정량화된 숙성도 정보를 품질 관리 및 상품성 판별에 활용
 
--
+![result(ex)_1](https://github.com/ttobagi4/ACK2025_Tropical/blob/8409abf3a85bb9334c1cf47e3d1048ef4eed9ae9/result(ex)_1.png)
+
+![result(ex)_2](https://github.com/ttobagi4/ACK2025_Tropical/blob/8409abf3a85bb9334c1cf47e3d1048ef4eed9ae9/result(ex)_2.png)
 
 ## 3️⃣ 연구 결과
 - 재학습된 Faster R-CNN 모델의 전체 mAP : 0.88
 - AP@0.5 : 올리브 0.78(정상), 0.94(탄저병) / 백향과 0.96(정상), 0.98(총채벌레) / 애플망고 0.99(정상), 0.81(그을음병), 0.73(총채벌레)
 
--
+![PR Curve](https://github.com/ttobagi4/ACK2025_Tropical/blob/8409abf3a85bb9334c1cf47e3d1048ef4eed9ae9/PR%20Curve.png)
 
 ## 4️⃣ 한계 & 보완할 점들
 - 병징 간 시각적 유사성 : 색상이나 패턴이 비슷한 병징 간 혼동 발생
